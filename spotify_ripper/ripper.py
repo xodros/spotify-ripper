@@ -7,7 +7,9 @@ from colorama import Fore
 from spotify_ripper.utils import *
 from spotify_ripper.tags import set_metadata_tags
 from spotify_ripper.progress import Progress
+from spotify_ripper.post_actions import PostActions
 from spotify_ripper.sync import Sync
+from spotify_ripper.eventloop import EventLoop
 import os
 import sys
 import time
@@ -18,7 +20,14 @@ import itertools
 import requests
 import wave
 import re
-import codecs
+
+try:
+    # Python 3
+    import queue
+except ImportError:
+    # Python 2
+    import Queue as queue
+
 
 class BitRate(spotify.utils.IntEnum):
     BITRATE_160K = 0
@@ -27,63 +36,58 @@ class BitRate(spotify.utils.IntEnum):
 
 
 class Ripper(threading.Thread):
+    name = 'SpotifyRipperThread'
+
     audio_file = None
     pcm_file = None
     wav_file = None
     rip_proc = None
     pipe = None
-    ripping = False
-    finished = False
     current_playlist = None
     current_album = None
-    tracks_to_remove = []
-    end_of_track = threading.Event()
+
     idx_digits = 3
     login_success = False
     progress = None
     sync = None
+    post = None
     dev_null = None
-    fail_log_file = None
-    success_tracks = []
-    failure_tracks = []
+
+    rip_queue = queue.Queue()
+
+    # threading events
+    logged_in = threading.Event()
+    logged_out = threading.Event()
+    ripping = threading.Event()
+    end_of_track = threading.Event()
+    finished = threading.Event()
+    abort = threading.Event()
 
     def __init__(self, args):
         threading.Thread.__init__(self)
-
-        # set to a daemon thread
-        self.daemon = True
 
         # initialize progress meter
         self.progress = Progress(args, self)
 
         self.args = args
-        self.logged_in = threading.Event()
-        self.logged_out = threading.Event()
+
+        # initially logged-out
         self.logged_out.set()
 
         config = spotify.Config()
-
         default_dir = default_settings_dir()
 
-        # create a log file for rip failures
-        if args.fail_log is not None:
-            _base_dir = base_dir(args)
-            if not os.path.exists(_base_dir):
-                os.makedirs(_base_dir)
-
-            encoding = "ascii" if args.ascii else "utf-8"
-            self.fail_log_file = codecs.open(os.path.join(
-                _base_dir, args.fail_log[0]), 'w', encoding)
+        self.post = PostActions(args, self)
 
         # application key location
         if args.key is not None:
             config.load_application_key_file(args.key[0])
         else:
-            if not os.path.exists(default_dir):
-                os.makedirs(default_dir)
+            if not path_exists(default_dir):
+                os.makedirs(enc_str(default_dir))
 
             app_key_path = os.path.join(default_dir, "spotify_appkey.key")
-            if not os.path.exists(app_key_path):
+            if not path_exists(app_key_path):
                 print("\n" + Fore.YELLOW +
                       "Please copy your spotify_appkey.key to " +
                       default_dir + ", or use the --key|-k option" +
@@ -105,11 +109,14 @@ class Ripper(threading.Thread):
         self.session.volume_normalization = args.normalize
 
         # disable scrobbling
-        self.session.social.set_scrobbling(spotify.SocialProvider.SPOTIFY,
+        self.session.social.set_scrobbling(
+            spotify.SocialProvider.SPOTIFY,
             spotify.ScrobblingState.LOCAL_DISABLED)
-        self.session.social.set_scrobbling(spotify.SocialProvider.FACEBOOK,
+        self.session.social.set_scrobbling(
+            spotify.SocialProvider.FACEBOOK,
             spotify.ScrobblingState.LOCAL_DISABLED)
-        self.session.social.set_scrobbling(spotify.SocialProvider.LASTFM,
+        self.session.social.set_scrobbling(
+            spotify.SocialProvider.LASTFM,
             spotify.ScrobblingState.LOCAL_DISABLED)
 
         bit_rates = dict([
@@ -128,98 +135,43 @@ class Ripper(threading.Thread):
         self.session.on(spotify.SessionEvent.LOGGED_IN,
                         self.on_logged_in)
 
-        self.event_loop = spotify.EventLoop(self.session)
-        self.event_loop.start()
+        self.event_loop = EventLoop(self.session, 0.1, self)
 
-    def log_failure(self, track):
-        self.failure_tracks.append(track)
-        if self.fail_log_file is not None:
-            self.fail_log_file.write(track.link.uri + "\n")
+    def stop_event_loop(self):
+        if self.event_loop.isAlive():
+            self.event_loop.stop()
+            self.event_loop.join()
 
-    def end_failure_log(self):
-        if self.fail_log_file is not None:
-            file_name = self.fail_log_file.name
-            self.fail_log_file.flush()
-            os.fsync(self.fail_log_file.fileno())
-            self.fail_log_file.close()
-            self.fail_log_file = None
-
-            if os.path.getsize(file_name) == 0:
-                rm_file(file_name)
-
-    def print_summary(self):
-        if len(self.success_tracks) + len(self.failure_tracks) <= 1:
-            return
-
-        def print_with_bullet(_str):
-            if self.args.ascii:
-                print(" * " + _str)
-            else:
-                print(" • " + _str)
-
-        def log_tracks(tracks):
-            for track in tracks:
-                try:
-                    track.load()
-                    if (len(track.artists) > 0 and track.artists[0].name is not None
-                        and track.name is not None):
-                        print_with_bullet(track.artists[0].name + " - " +
-                            track.name)
-                    else:
-                       print_with_bullet(track.link.uri)
-                except spotify.Error as e:
-                    print_with_bullet(track.link.uri)
-            print("")
-
-        if len(self.success_tracks) > 0:
-            print(Fore.GREEN + "\nSuccess Summary (" + str(len(self.success_tracks)) +
-                ")\n" + ("-" * 79) + Fore.RESET)
-            log_tracks(self.success_tracks)
-        if len(self.failure_tracks) > 0:
-            print(Fore.RED + "\nFailure Summary (" + str(len(self.failure_tracks)) +
-                ")\n" + ("-" * 79) + Fore.RESET)
-            log_tracks(self.failure_tracks)
-
-    def create_playlist_m3u(self, tracks):
+    # executes on main thread (not SpotifyRipper thread)
+    def login(self):
         args = self.args
-        if self.current_playlist is not None and args.playlist_m3u:
-            _base_dir = base_dir(args)
-            playlist_path = to_ascii(
-                args, os.path.join(_base_dir, self.current_playlist.name + '.m3u')
-            )
 
-            print(Fore.GREEN + "Creating playlist m3u file " + playlist_path + Fore.RESET)
+        print("Logging in...")
+        if args.last:
+            self.login_as_last()
 
-            encoding = "ascii" if args.ascii else "utf-8"
-            with codecs.open(playlist_path, 'w', encoding) as playlist:
-                for idx, track in enumerate(tracks):
-                    _file = self.format_track_path(idx, track)
-                    if os.path.exists(_file):
-                        playlist.write(os.path.relpath(_file, _base_dir) + "\n")
+        if not self.login_success and args.user is not None:
+            if args.password is None:
+                password = getpass.getpass()
+                self.login_as_user(args.user[0], password)
+            else:
+                self.login_as_user(args.user[0], args.password[0])
 
+        return self.login_success
 
     def run(self):
         args = self.args
 
-        # login
-        print("Logging in...")
-        if args.last:
-            self.login_as_last()
-        elif args.user is not None and args.password is None:
-            password = getpass.getpass()
-            self.login(args.user[0], password)
-        else:
-            self.login(args.user[0], args.password[0])
+        # start event loop
+        self.event_loop.start()
 
-        if not self.login_success:
-            print(
-                Fore.RED + "Encountered issue while logging into "
-                           "Spotify, aborting..." + Fore.RESET)
-            self.finished = True
+        # wait for main thread to login
+        self.logged_in.wait()
+        if self.abort.is_set():
             return
 
         # check if we were passed a file name or search
-        if len(args.uri) == 1 and os.path.exists(args.uri[0]):
+        if len(args.uri) == 1 and path_exists(args.uri[0]):
             uris = [line.strip() for line in open(args.uri[0])]
         elif len(args.uri) == 1 and not args.uri[0].startswith("spotify:"):
             uris = [list(self.search_query(args.uri[0]))]
@@ -254,7 +206,10 @@ class Ripper(threading.Thread):
 
         # create track iterator
         for uri in uris:
-            tracks = get_tracks_from_uri(uri)
+            if self.abort.is_set():
+                break
+
+            tracks = list(get_tracks_from_uri(uri))
 
             if args.flat_with_index and self.current_playlist:
                 self.idx_digits = len(str(len(self.current_playlist.tracks)))
@@ -266,30 +221,55 @@ class Ripper(threading.Thread):
             # ripping loop
             for idx, track in enumerate(tracks):
                 try:
+                    if self.abort.is_set():
+                        break
+
                     print('Loading track...')
                     track.load()
                     if track.availability != 1:
                         print(
                             Fore.RED + 'Track is not available, '
                                        'skipping...' + Fore.RESET)
-                        self.log_failure(track)
+                        self.post.log_failure(track)
                         continue
 
                     self.audio_file = self.format_track_path(idx, track)
 
-                    if not args.overwrite and os.path.exists(self.audio_file):
+                    if not args.overwrite and path_exists(self.audio_file):
                         print(
                             Fore.YELLOW + "Skipping " +
                             track.link.uri + Fore.RESET)
                         print(Fore.CYAN + self.audio_file + Fore.RESET)
-                        self.queue_remove_from_playlist(idx)
+                        self.post.queue_remove_from_playlist(idx)
                         continue
 
                     self.session.player.load(track)
                     self.prepare_rip(idx, track)
                     self.session.player.play()
 
-                    self.end_of_track.wait()
+                    while not self.end_of_track.is_set() or \
+                            not self.rip_queue.empty():
+                        try:
+                            if self.abort.is_set():
+                                break
+
+                            rip_item = self.rip_queue.get(timeout=1)
+
+                            if self.abort.is_set():
+                                break
+
+                            self.rip(self.session, rip_item[0],
+                                     rip_item[1], rip_item[2])
+                        except queue.Empty:
+                            pass
+
+                    if self.abort.is_set():
+                        self.session.player.play(False)
+                        self.end_of_track.set()
+                        self.post.clean_up_partial()
+                        self.post.log_failure(track)
+                        break
+
                     self.end_of_track.clear()
 
                     self.finish_rip(track)
@@ -299,30 +279,40 @@ class Ripper(threading.Thread):
 
                     # make a note of the index and remove all the
                     # tracks from the playlist when everything is done
-                    self.queue_remove_from_playlist(idx)
+                    self.post.queue_remove_from_playlist(idx)
 
-                except spotify.Error as e:
-                    print(Fore.RED + "Spotify error detected" + Fore.RESET)
+                except (spotify.Error, Exception) as e:
+                    if isinstance(e, Exception):
+                        print(Fore.RED + "Spotify error detected" + Fore.RESET)
                     print(str(e))
                     print("Skipping to next track...")
                     self.session.player.play(False)
-                    self.clean_up_partial()
-                    self.log_failure(track)
+                    self.post.clean_up_partial()
+                    self.post.log_failure(track)
                     continue
 
-            # create playlist m3u file if needed
-            self.create_playlist_m3u(tracks)
+            if not self.abort.is_set():
+                # create playlist m3u file if needed
+                self.post.create_playlist_m3u(tracks)
 
-            # actually removing the tracks from playlist
-            self.remove_tracks_from_playlist()
+                # create playlist wpl file if needed
+                self.post.create_playlist_wpl(tracks)
+
+                # actually removing the tracks from playlist
+                self.post.remove_tracks_from_playlist()
 
         # logout, we are done
-        self.end_failure_log()
-        self.print_summary()
+        self.post.end_failure_log()
+        self.post.print_summary()
         self.logout()
-        self.finished = True
+        self.stop_event_loop()
+        self.finished.set()
 
     def load_link(self, uri):
+        # blank out current playlist/album
+        self.current_playlist = None
+        self.current_album = None
+
         # ignore if the uri is just blank (e.g. from a file)
         if not uri:
             return iter([])
@@ -415,9 +405,8 @@ class Ripper(threading.Thread):
         return album_uris
 
     def search_query(self, query):
-        args = self.args
-
         print("Searching for query: " + query)
+
         try:
             result = self.session.search(query)
             result.load()
@@ -429,9 +418,9 @@ class Ripper(threading.Thread):
         print(Fore.GREEN + "Results" + Fore.RESET)
         for track_idx, track in enumerate(result.tracks):
             print("  " + Fore.YELLOW + str(track_idx + 1) + Fore.RESET +
-                  " [" + to_ascii(args, track.album.name) + "] " +
-                  to_ascii(args, track.artists[0].name) + " - " +
-                  to_ascii(args, track.name) +
+                  " [" + to_ascii(track.album.name) + "] " +
+                  to_ascii(track.artists[0].name) + " - " +
+                  to_ascii(track.name) +
                   " (" + str(track.popularity) + ")")
 
         pick = raw_input("Pick track(s) (ex 1-3,5): ")
@@ -463,14 +452,14 @@ class Ripper(threading.Thread):
             print(Fore.RED + "Invalid selection" + Fore.RESET)
         return iter([])
 
-    def clean_up_partial(self):
-        if self.audio_file is not None and os.path.exists(self.audio_file):
-            print(Fore.YELLOW + "Deleting partially ripped file" + Fore.RESET)
-            rm_file(self.audio_file)
-
     def on_music_delivery(self, session, audio_format,
                           frame_bytes, num_frames):
-        self.rip(session, audio_format, frame_bytes, num_frames)
+        try:
+            self.rip_queue.put_nowait((audio_format.sample_rate,
+                                       frame_bytes, num_frames))
+        except queue.Full:
+            print(Fore.RED + "rip_queue is full. dropped music data" +
+                  Fore.RESET)
         return num_frames
 
     def on_connection_state_changed(self, session):
@@ -486,7 +475,7 @@ class Ripper(threading.Thread):
         if error is spotify.ErrorType.OK:
             print("Logged in as " + session.user.display_name)
         else:
-            errorMap = {
+            error_map = {
                 9: "CLIENT_TOO_OLD",
                 8: "UNABLE_TO_CONTACT_SERVER",
                 6: "BAD_USERNAME_OR_PASSWORD",
@@ -496,21 +485,19 @@ class Ripper(threading.Thread):
                 10: "OTHER_PERMANENT"
             }
             print("Logged in failed: " +
-                  errorMap.get(error, "UNKNOWN_ERROR_CODE: " + str(error)))
+                  error_map.get(error, "UNKNOWN_ERROR_CODE: " + str(error)))
             self.login_success = False
             self.logged_in.set()
 
     def play_token_lost(self, session):
         print("\n" + Fore.RED + "Play token lost, aborting..." + Fore.RESET)
-        self.session.player.play(False)
-        self.clean_up_partial()
-        self.finished = True
+        self.abort_rip()
 
     def on_end_of_track(self, session):
         self.session.player.play(False)
         self.end_of_track.set()
 
-    def login(self, user, password):
+    def login_as_user(self, user, password):
         """login into Spotify"""
         self.session.login(user, password, remember_me=True)
         self.logged_in.wait()
@@ -521,6 +508,7 @@ class Ripper(threading.Thread):
             self.session.relogin()
             self.logged_in.wait()
         except spotify.Error as e:
+            self.login_success = False
             print(str(e))
 
     def logout(self):
@@ -530,7 +518,6 @@ class Ripper(threading.Thread):
             print('Logging out...')
             self.session.logout()
             self.logged_out.wait()
-        self.event_loop.stop()
 
     def album_artists_web(self, uri):
         def get_album_json(album_id):
@@ -560,21 +547,20 @@ class Ripper(threading.Thread):
 
     def format_track_path(self, idx, track):
         args = self.args
-        _base_dir = base_dir(args)
+        _base_dir = base_dir()
         audio_file = args.format[0].strip()
 
         track_artist = to_ascii(
-            args, escape_filename_part(track.artists[0].name))
-        track_artists = to_ascii(args, ", ".join(
+            escape_filename_part(track.artists[0].name))
+        track_artists = to_ascii(", ".join(
             [artist.name for artist in track.artists]))
         if len(track.artists) > 1:
-            featuring_artists = to_ascii(args, ", ".join(
+            featuring_artists = to_ascii(", ".join(
                 [artist.name for artist in track.artists[1:]]))
         else:
             featuring_artists = ""
 
         album_artist = to_ascii(
-            args,
             self.current_album.artist.name
             if self.current_album is not None else track_artist)
         album_artists_web = track_artists
@@ -584,18 +570,19 @@ class Ripper(threading.Thread):
                 audio_file.find("{album_artists_web}") >= 0):
             artist_array = self.album_artists_web(self.current_album.link.uri)
             if artist_array is not None:
-                album_artists_web = to_ascii(args, ", ".join(artist_array))
+                album_artists_web = to_ascii(", ".join(artist_array))
 
-        album = to_ascii(args, escape_filename_part(track.album.name))
-        track_name = to_ascii(args, escape_filename_part(track.name))
+        album = to_ascii(escape_filename_part(track.album.name))
+        track_name = to_ascii(escape_filename_part(track.name))
         year = str(track.album.year)
         extension = args.output_type
-        idx_str = str(idx)
+        idx_str = str(idx + 1)
         track_num = str(track.index)
         disc_num = str(track.disc)
         if self.current_playlist is not None:
-            playlist_name = to_ascii(args, self.current_playlist.name)
-            playlist_owner = to_ascii(args, self.current_playlist.owner.display_name)
+            playlist_name = to_ascii(self.current_playlist.name)
+            playlist_owner = to_ascii(
+                self.current_playlist.owner.display_name)
         else:
             playlist_name = "No Playlist"
             playlist_owner = "No Playlist Owner"
@@ -635,6 +622,7 @@ class Ripper(threading.Thread):
         fill_tags = {"idx", "index", "track_num", "track_idx",
                      "track_index", "disc_num", "disc_idx", "disc_index"}
         prefix_tags = {"feat_artists", "featuring_artists"}
+        paren_tags = {"track_name", "track"}
         for tag in tags.keys():
             audio_file = audio_file.replace("{" + tag + "}", tags[tag])
             if tag in fill_tags:
@@ -655,9 +643,23 @@ class Ripper(threading.Thread):
                         audio_file = audio_file[:match.start()] + tokens[1] + \
                             " " + tags[tag] + audio_file[match.end():]
                 else:
-                    match = re.search(r"\s*\{" + tag + r":[^\}]+\}", audio_file)
+                    match = re.search(r"\s*\{" + tag +
+                                      r":[^\}]+\}", audio_file)
                     if match:
-                        audio_file = audio_file[:match.start()] + audio_file[match.end():]
+                        audio_file = audio_file[:match.start()] + \
+                                     audio_file[match.end():]
+            if tag in paren_tags:
+                match = re.search(r"\{" + tag + r":paren\}", audio_file)
+                if match:
+                    match_tag = re.search(r"(.*)\s+-\s+([^-]+)", tags[tag])
+                    if match_tag:
+                        audio_file = audio_file[:match.start()] + \
+                                     match_tag.group(1) + " (" + \
+                                     match_tag.group(2) + ")" + \
+                                     audio_file[match.end():]
+                    else:
+                        audio_file = audio_file[:match.start()] + tags[tag] + \
+                                     audio_file[match.end():]
 
         # in case the file name is too long
         def truncate(_str, max_size):
@@ -684,13 +686,16 @@ class Ripper(threading.Thread):
         else:
             audio_file = truncate_file_name(tokens[0])
 
+        # remove not allowed characters in filename and encode utf-8
+        audio_file = audio_file.replace('*."/\[]:;|=,', '')
+
         # prepend base_dir
-        audio_file = to_ascii(args, os.path.join(_base_dir, audio_file))
+        audio_file = to_ascii(os.path.join(_base_dir, audio_file))
 
         # create directory if it doesn't exist
         audio_path = os.path.dirname(audio_file)
-        if not os.path.exists(audio_path):
-            os.makedirs(audio_path)
+        if not path_exists(audio_path):
+            os.makedirs(enc_str(audio_path))
 
         return audio_file
 
@@ -708,7 +713,7 @@ class Ripper(threading.Thread):
             print(Fore.GREEN + "Ripping " + track.link.uri + Fore.RESET)
         print(Fore.CYAN + self.audio_file + Fore.RESET)
 
-        file_size = calc_file_size(self.args, track)
+        file_size = calc_file_size(track)
         print("Track Download Size: " + format_size(file_size))
 
         if args.output_type == "wav":
@@ -724,7 +729,9 @@ class Ripper(threading.Thread):
                 stdin=PIPE)
         elif args.output_type == "alac.m4a":
             self.rip_proc = Popen(
-                ["avconv", "-nostats", "-loglevel", "0", "-f", "s16le", "-ar", "44100", "-ac", "2", "-channel_layout", "stereo", "-i", "-", "-acodec", "alac", self.audio_file],
+                ["avconv", "-nostats", "-loglevel", "0", "-f", "s16le", "-ar",
+                 "44100", "-ac", "2", "-channel_layout", "stereo", "-i", "-",
+                 "-acodec", "alac", self.audio_file],
                 stdin=PIPE)
         elif args.output_type == "ogg":
             if args.cbr:
@@ -785,7 +792,7 @@ class Ripper(threading.Thread):
         if self.rip_proc is not None:
             self.pipe = self.rip_proc.stdin
 
-        self.ripping = True
+        self.ripping.set()
 
     def finish_rip(self, track):
         self.progress.end_track()
@@ -813,12 +820,12 @@ class Ripper(threading.Thread):
             self.pcm_file.close()
             self.pcm_file = None
 
-        self.ripping = False
-        self.success_tracks.append(track)
+        self.ripping.clear()
+        self.post.log_success(track)
 
-    def rip(self, session, audio_format, frame_bytes, num_frames):
-        if self.ripping:
-            self.progress.update_progress(num_frames, audio_format)
+    def rip(self, session, sample_rate, frame_bytes, num_frames):
+        if self.ripping.is_set():
+            self.progress.update_progress(num_frames, sample_rate)
             if self.pipe is not None:
                 self.pipe.write(frame_bytes)
 
@@ -826,42 +833,8 @@ class Ripper(threading.Thread):
                 self.wav_file.writeframes(frame_bytes)
 
             if self.pcm_file is not None:
-              self.pcm_file.write(frame_bytes)
+                self.pcm_file.write(frame_bytes)
 
-    def abort(self):
-        self.session.player.play(False)
-        self.clean_up_partial()
-        self.remove_tracks_from_playlist()
-        self.end_failure_log()
-        self.print_summary()
-        self.logout()
-        self.finished = True
-
-    def queue_remove_from_playlist(self, idx):
-        if self.args.remove_from_playlist:
-            if self.current_playlist:
-                if self.current_playlist.owner.canonical_name == self.session.user.canonical_name:
-                    self.tracks_to_remove.append(idx)
-                else:
-                    print(Fore.RED +
-                          "This track will not be removed from playlist " +
-                          self.current_playlist.name + " since " +
-                          self.session.user.canonical_name +
-                          " is not the playlist owner..." + Fore.RESET)
-            else:
-                print(Fore.RED +
-                      "No playlist specified to remove this track from. " +
-                      "Did you use '-r' without a playlist link?" + Fore.RESET)
-
-    def remove_tracks_from_playlist(self):
-        if self.args.remove_from_playlist and \
-                self.current_playlist and len(self.tracks_to_remove) > 0:
-            print(Fore.YELLOW +
-                  "Removing successfully ripped tracks from playlist " +
-                  self.current_playlist.name + "..." + Fore.RESET)
-
-            self.current_playlist.remove_tracks(self.tracks_to_remove)
-            self.session.process_events()
-
-            while self.current_playlist.has_pending_changes:
-                time.sleep(0.1)
+    def abort_rip(self):
+        self.ripping.clear()
+        self.abort.set()

@@ -67,13 +67,13 @@ def set_metadata_tags(args, audio_file, track):
     try:
         audio = None
         on_error = 'replace' if args.ascii_path_only else 'ignore'
-        album = to_ascii(args, track.album.name, on_error)
-        artist = to_ascii(args, track.artists[0].name, on_error)
-        title = to_ascii(args, track.name, on_error)
+        album = to_ascii(track.album.name, on_error)
+        artist = to_ascii(track.artists[0].name, on_error)
+        title = to_ascii(track.name, on_error)
         if args.comment is not None:
-            comment = to_ascii(args, args.comment[0], on_error)
+            comment = to_ascii(args.comment[0], on_error)
         if genres is not None and genres:
-            genres_ascii = [to_ascii(args, genre) for genre in genres]
+            genres_ascii = [to_ascii(genre) for genre in genres]
 
         # cover art image
         image = track.album.cover()
@@ -93,7 +93,7 @@ def set_metadata_tags(args, audio_file, track):
                 if args.cover_file is not None:
                     cover_path = os.path.dirname(audio_file)
                     cover_file = os.path.join(cover_path, args.cover_file[0])
-                    if not os.path.exists(cover_file):
+                    if not path_exists(cover_file):
                         with open(cover_file, "wb") as f:
                             f.write(image.data)
                 else:
@@ -395,7 +395,8 @@ def set_metadata_tags(args, audio_file, track):
                   str(audio.info.sample_rate) +
                   " Hz - " + channel_str(audio.info.channels) + " ]")
             print("-" * 79)
-            print(Fore.YELLOW + "Writing Apple iTunes metadata - " + Fore.RESET)
+            print(Fore.YELLOW + "Writing Apple iTunes metadata - " +
+                  Fore.RESET)
             print("-" * 79)
         elif args.output_type == "ogg":
             print("Time: " + format_time(audio.info.length) +

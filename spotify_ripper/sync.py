@@ -5,10 +5,10 @@ from __future__ import unicode_literals
 from colorama import Fore, Style
 from spotify_ripper.utils import *
 import os
-import sys
 import json
 import codecs
 import spotify
+
 
 class Sync(object):
 
@@ -30,8 +30,8 @@ class Sync(object):
         else:
             lib_path = os.path.join(default_settings_dir(), "Sync")
 
-        if not os.path.exists(lib_path):
-            os.makedirs(lib_path)
+        if not path_exists(lib_path):
+            os.makedirs(enc_str(lib_path))
 
         encoding = "ascii" if args.ascii else "utf-8"
         return os.path.join(lib_path, uri_tokens[4].encode(encoding) + ".json")
@@ -42,34 +42,34 @@ class Sync(object):
 
         encoding = "ascii" if args.ascii else "utf-8"
         with codecs.open(lib_path, 'w', encoding) as lib_file:
-            lib_file.write(json.dumps(lib, ensure_ascii=args.ascii,
-                indent=4, separators=(',', ': ')))
+            lib_file.write(
+                json.dumps(lib, ensure_ascii=args.ascii,
+                           indent=4, separators=(',', ': ')))
 
     def load_sync_library(self, playlist):
         args = self.args
         lib_path = self.sync_lib_path(playlist)
 
-        if os.path.exists(lib_path):
+        if path_exists(lib_path):
             encoding = "ascii" if args.ascii else "utf-8"
             with codecs.open(lib_path, 'r', encoding) as lib_file:
                 return json.loads(lib_file.read())
         else:
             return {}
 
-
     def sync_playlist(self, playlist):
         args = self.args
         lib = self.load_sync_library(playlist)
         new_lib = {}
 
-        print("Syncing playlist " + to_ascii(args, playlist.name))
+        print("Syncing playlist " + to_ascii(playlist.name))
 
         # remove any missing files from the lib or playlist
         uris = set([t.link.uri for t in playlist.tracks])
         for uri, file_path in lib.items():
             encoding = "ascii" if args.ascii else "utf-8"
             file_path = file_path.encode(encoding)
-            if not os.path.exists(file_path):
+            if not path_exists(file_path):
                 del lib[uri]
             elif uri not in uris:
                 os.remove(file_path)

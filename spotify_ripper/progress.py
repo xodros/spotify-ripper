@@ -63,11 +63,11 @@ class Progress(object):
                 if track.availability != 1:
                     continue
                 audio_file = self.ripper.format_track_path(idx, track)
-                if not self.args.overwrite and os.path.exists(audio_file):
+                if not self.args.overwrite and path_exists(audio_file):
                     continue
                 self.total_tracks += 1
                 self.total_duration += track.duration
-                file_size = calc_file_size(self.args, track)
+                file_size = calc_file_size(track)
                 self.total_size += file_size
             except spotify.Error as e:
                 continue
@@ -140,20 +140,20 @@ class Progress(object):
         self.total_position += self.current_track.duration
         self.current_track = None
 
-    def update_progress(self, num_frames, audio_format):
+    def update_progress(self, num_frames, sample_rate):
         if self.args.has_log:
             return
 
         # log output until we run out of space on this line
         def output_what_fits(init, output_strings):
-            print_str(self.args, init)
+            print_str(init)
             w = 0
             for _str in output_strings:
                 _len = len(_str)
                 if w + _len >= (self.term_width - 1):
                     return
 
-                print_str(self.args, _str)
+                print_str(_str)
                 w += _len
 
         # make progress bar width flexible
@@ -165,8 +165,8 @@ class Progress(object):
             prog_width = 40
 
         # song position/progress calculations
-        if num_frames > 0 and audio_format.sample_rate > 0:
-            self.song_position += (num_frames * 1000) / audio_format.sample_rate
+        if num_frames > 0 and sample_rate > 0:
+            self.song_position += (num_frames * 1000) / sample_rate
         pos_seconds = self.song_position // 1000
         dur_seconds = self.song_duration // 1000
         pct = int(self.song_position * 100 // self.song_duration) \
@@ -214,8 +214,8 @@ class Progress(object):
             if self.total_eta is not None:
                 _spaces = max(22 - len(output_strings[2]), 1) * " "
                 output_strings.append(_spaces)
-                _str = "(~" + format_time(self.total_eta,
-                                            short=True) + " remaining)"
+                _str = "(~" + format_time(self.total_eta, short=True) + \
+                       " remaining)"
                 output_strings.append(_str)
 
             output_what_fits("\n\033[2K", output_strings)
@@ -224,4 +224,4 @@ class Progress(object):
         self.song_position = self.song_duration
         self.eta_calc()
         self.update_progress(0, None)
-        print_str(self.args, "\n")
+        print_str("\n")

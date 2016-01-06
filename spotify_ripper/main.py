@@ -9,20 +9,19 @@ from spotify_ripper.utils import *
 import os
 import sys
 import codecs
-import time
 import argparse
 import pkg_resources
+import schedule
+import signal
 
 if sys.version_info >= (3, 0):
     import configparser as ConfigParser
 else:
     import ConfigParser
-import schedule
-import signal
 
 
-def load_config(args, defaults):
-    _settings_dir = settings_dir(args)
+def load_config(defaults):
+    _settings_dir = settings_dir()
     config_file = os.path.join(_settings_dir, "config.ini")
     if os.path.exists(config_file):
         try:
@@ -104,6 +103,7 @@ def main(prog_args=sys.argv[1:]):
         help='Path to settings, config and temp files directory '
              '[Default=~/.spotify-ripper]')
     args, remaining_argv = settings_parser.parse_known_args(prog_args)
+    init_util_globals(args)
 
     # load config file, overwriting any defaults
     defaults = {
@@ -112,7 +112,7 @@ def main(prog_args=sys.argv[1:]):
         "comp": "10",
         "vbr": "0",
     }
-    defaults = load_config(args, defaults)
+    defaults = load_config(defaults)
 
     parser = argparse.ArgumentParser(
         prog='spotify-ripper',
@@ -171,7 +171,8 @@ def main(prog_args=sys.argv[1:]):
         help='Add custom metadata comment to all songs')
     parser.add_argument(
         '--cover-file', nargs=1,
-        help='Save album cover image to file name (e.g "cover.jpg") [Default=embed]')
+        help='Save album cover image to file name (e.g "cover.jpg") '
+             '[Default=embed]')
     parser.add_argument(
         '-d', '--directory', nargs=1,
         help='Base directory where ripped MP3s are saved [Default=cwd]')
@@ -203,7 +204,8 @@ def main(prog_args=sys.argv[1:]):
         help='Store ID3 tags using version v2.3 [Default=v2.4]')
     parser.add_argument(
         '-k', '--key', nargs=1,
-        help='Path to Spotify application key file [Default=Settings Directory]')
+        help='Path to Spotify application key file '
+             '[Default=Settings Directory]')
     group.add_argument(
         '-u', '--user', nargs=1,
         help='Spotify username')
@@ -235,6 +237,9 @@ def main(prog_args=sys.argv[1:]):
     parser.add_argument(
         '--playlist-m3u', action='store_true',
         help='create a m3u file when ripping a playlist')
+    parser.add_argument(
+        '--playlist-wpl', action='store_true',
+        help='create a wpl file when ripping a playlist')
     parser.add_argument(
         '--playlist-sync', action='store_true',
         help='Sync playlist songs (rename and remove old songs)')
@@ -271,6 +276,7 @@ def main(prog_args=sys.argv[1:]):
         help='One or more Spotify URI(s) (either URI, a file of URIs or a '
              'search query)')
     args = parser.parse_args(remaining_argv)
+    init_util_globals(args)
 
     # kind of a hack to get colorama stripping to work when outputting
     # to a file instead of stdout.  Taken from initialise.py in colorama
@@ -406,9 +412,9 @@ def main(prog_args=sys.argv[1:]):
     print(Fore.YELLOW + "  Unicode support:\t" +
           Fore.RESET + unicode_support_str())
     print(Fore.YELLOW + "  Output directory:\t" + Fore.RESET +
-          base_dir(args))
+          base_dir())
     print(Fore.YELLOW + "  Settings directory:\t" + Fore.RESET +
-          settings_dir(args))
+          settings_dir())
 
     print(Fore.YELLOW + "  Format String:\t" + Fore.RESET + args.format[0])
     print(Fore.YELLOW + "  Overwrite files:\t" +
@@ -427,18 +433,37 @@ def main(prog_args=sys.argv[1:]):
         ripper.progress.handle_resize()
         signal.signal(signal.SIGWINCH, ripper.progress.handle_resize)
 
-    # wait for ripping thread to finish
+    def abort(set_logged_in=False):
+        ripper.abort_rip()
+        if set_logged_in:
+            ripper.logged_in.set()
+        ripper.join()
+        sys.exit(1)
+
+    # login on main thread to catch any KeyboardInterrupt
     try:
-        while not ripper.finished:
-            schedule.run_pending()
-            time.sleep(0.1)
+        if not ripper.login():
+            print(
+                Fore.RED + "Encountered issue while logging into "
+                           "Spotify, aborting..." + Fore.RESET)
+            abort(set_logged_in=True)
+
     except (KeyboardInterrupt, Exception) as e:
         if not isinstance(e, KeyboardInterrupt):
             print(str(e))
         print("\n" + Fore.RED + "Aborting..." + Fore.RESET)
-        ripper.abort()
-        sys.exit(1)
+        abort(set_logged_in=True)
 
+    # wait for ripping thread to finish
+    try:
+        while ripper.isAlive():
+            schedule.run_pending()
+            ripper.join(0.1)
+    except (KeyboardInterrupt, Exception) as e:
+        if not isinstance(e, KeyboardInterrupt):
+            print(str(e))
+        print("\n" + Fore.RED + "Aborting..." + Fore.RESET)
+        abort()
 
 if __name__ == '__main__':
     main()

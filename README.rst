@@ -48,6 +48,8 @@ Features
 
 -  helpful progress bar to gauge the time remaining until completion
 
+-  keep local files in sync with a Spotify playlist, m3u and wpl playlist file
+
 -  option to rip to ALAC, a loseless codec, instead of MP3 (requires extra ``avconv`` dependency)
 
 -  option to rip to FLAC, a loseless codec, instead of MP3 (requires extra ``flac`` dependency)
@@ -60,7 +62,8 @@ Features
 
 -  option to rip to MP4/M4A instead of MP3 (requires compiling ``fdkaac``)
 
--  keep local files in sync with a Spotify playlist and m3u playlist file
+**Please note: Spotify’s highest quality setting is 320 kbps, so the benefit of ripping to a lossless format is to not double encode the audio data. It’s not possible to rip in true lossless quality.**
+
 
 Usage
 -----
@@ -79,9 +82,9 @@ Command Line
                           [--flat-with-index] [-g {artist,album}] [--id3-v23]
                           [-k KEY] [-u USER] [-p PASSWORD] [-l] [-L LOG] [--pcm]
                           [--mp4] [--normalize] [-o] [--opus] [--playlist-m3u]
-                          [--playlist-sync] [-q VBR] [-Q {160,320,96}] [-s]
-                          [--stereo-mode {j,s,f,d,m,l,r}] [-V] [--wav] [--vorbis]
-                          [-r] [-x]
+                          [--playlist-wpl] [--playlist-sync] [-q VBR]
+                          [-Q {160,320,96}] [-s] [--stereo-mode {j,s,f,d,m,l,r}]
+                          [-V] [--wav] [--vorbis] [-r] [-x]
                           uri [uri ...]
 
     Rips Spotify URIs to MP3s with ID3 tags and album covers
@@ -128,6 +131,7 @@ Command Line
       -o, --overwrite       Overwrite existing MP3 files [Default=skip]
       --opus                Rip songs to Opus encoding instead of MP3
       --playlist-m3u        create a m3u file when ripping a playlist
+      --playlist-wpl        create a wpl file when ripping a playlist
       --playlist-sync       Sync playlist songs (rename and remove old songs)
       -q VBR, --vbr VBR     VBR quality setting or target bitrate for Opus [Default=0]
       -Q {160,320,96}, --quality {160,320,96}
@@ -228,8 +232,8 @@ Format String Variables
 +-----------------------------------------+-----------------------------------------------+
 |``{user}``, ``{username}``               | Spotify username of logged-in user            |
 +-----------------------------------------+-----------------------------------------------+
-|``{feat_artists}, ``{featuring_artists}``| Featuring artists join by commas (see Prefix  |
-|                                         | String section below)                         |
+|``{feat_artists}``,                      | Featuring artists join by commas (see Prefix  |
+|``{featuring_artists}``                  | String section below)                         |
 +-----------------------------------------+-----------------------------------------------+
 
 Any substring in the format string that does not match a variable above will be passed through to the file/path name unchanged.
@@ -289,6 +293,20 @@ Mac OS X
 Recommend approach uses `homebrew <http://brew.sh/>`__ and
 `pyenv <https://github.com/yyuu/pyenv>`__
 
+To install pyenv using homebrew:
+
+.. code:: bash
+
+    $ brew update
+    $ brew install pyenv
+    $ echo 'if which pyenv > /dev/null; then eval "$(pyenv init -)"; fi' >> ~/.bash_profile
+    ## restart terminal ##
+    $ pyenv install 2.7.10  # or whatever version of python you want
+    $ pyenv global 2.7.10
+    $ python -V             # should say Python 2.7.10
+
+To install spotify-ripper once pyenv is setup:
+
 .. code:: bash
 
     $ brew install homebrew/binary/libspotify
@@ -313,6 +331,18 @@ too. If you are installing on the Raspberry Pi (gen 1), use the
 version <https://developer.spotify.com/download/libspotify/libspotify-12.1.103-Linux-armv6-bcm2708hardfp-release.tar.gz>`__
 of libspotify.
 
+To install pyenv using `pyenv-installer <https://github.com/yyuu/pyenv-installer>`__ (requires git and curl):
+
+.. code:: bash
+
+    $ curl -L https://raw.githubusercontent.com/yyuu/pyenv-installer/master/bin/pyenv-installer | bash
+    ## restart terminal ##
+    $ pyenv install 2.7.10  # or whatever version of python you want
+    $ pyenv global 2.7.10
+    $ python -V             # should say Python 2.7.10
+
+To install spotify-ripper once pyenv is setup:
+
 .. code:: bash
 
     $ sudo apt-get install lame build-essential libffi-dev
@@ -327,6 +357,12 @@ Download an application key file ``spotify_appkey.key`` from
 ``https://devaccount.spotify.com/my-account/keys/`` (requires a Spotify
 Premium Account) and move the file to the ``~/.spotify-ripper`` directory (or use
 the ``-k | --key`` option).
+
+Windows
+~~~~~~~
+
+Unfortunately, pyspotify seems to have an issue building on Windows (if someone can get this to work, please let me know). The best alternative is to run a linux distribution in a virtual machine.  Basic instructions to install Ubuntu on Virtual Box can be found in the `wiki <https://github.com/jrnewell/spotify-ripper/wiki/Windows>`__.
+
 
 Optional Encoding Formats
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -392,6 +428,19 @@ Use ``pip`` to upgrade to the latest version.
 .. code:: bash
 
     $ pip install --upgrade spotify-ripper
+
+
+Common Issues and Problems
+--------------------------
+
+Help for common problems while using spotify-ripper can be found in the `wiki <https://github.com/jrnewell/spotify-ripper/wiki/Help>`__.
+
+
+Release Notes
+-------------
+
+Release notes can be found in the `wiki <https://github.com/jrnewell/spotify-ripper/wiki/Release-Notes>`__.
+
 
 License
 -------
