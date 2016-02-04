@@ -16,6 +16,8 @@ Libspotify’s Deprecation
 
 *Note that as of May 2015 libspotify is officially deprecated by Spotify and is no longer actively maintained.*
 
+*Note that as of Jan 2016 Spotify may no longer be issuing developer keys.*
+
 *Spotify has published newer libraries intended for Android and iOS development, as well as web APIs to access track metadata and manage playlists. Though, for making apps with Spotify playback capabilities, on any other platform than Android and iOS, there is currently no alternative to libspotify.*
 
 *libspotify has been the main way of integrating with Spotify since 2009, and is today a part of numerous open source projects and commercial applications, including many receivers and even cars. There’s no guarantees, but one can hope that the large deployment of libspotify means that the library will continue to work with the Spotify service for a long time into the future.*
@@ -62,6 +64,10 @@ Features
 
 -  option to rip to MP4/M4A instead of MP3 (requires compiling ``fdkaac``)
 
+-  option to replace output filenames
+
+-  option to normalize output filenames to NFKD (see http://unicode.org/faq/normalization.html)
+
 **Please note: Spotify’s highest quality setting is 320 kbps, so the benefit of ripping to a lossless format is to not double encode the audio data. It’s not possible to rip in true lossless quality.**
 
 
@@ -83,8 +89,10 @@ Command Line
                           [-k KEY] [-u USER] [-p PASSWORD] [-l] [-L LOG] [--pcm]
                           [--mp4] [--normalize] [-o] [--opus] [--playlist-m3u]
                           [--playlist-wpl] [--playlist-sync] [-q VBR]
-                          [-Q {160,320,96}] [-s] [--stereo-mode {j,s,f,d,m,l,r}]
-                          [-V] [--wav] [--vorbis] [-r] [-x]
+                          [-Q {160,320,96}] [--resume-after RESUME_AFTER] [-s]
+                          [--stereo-mode {j,s,f,d,m,l,r}]
+                          [--stop-after STOP_AFTER] [-V] [--wav] [--vorbis] [-r]
+                          [-x]
                           uri [uri ...]
 
     Rips Spotify URIs to MP3s with ID3 tags and album covers
@@ -105,7 +113,7 @@ Command Line
                             CBR bitrate [Default=320]
       -c, --cbr             CBR encoding [Default=VBR]
       --comp COMP           compression complexity for FLAC and Opus [Default=Max]
-      --comment COMMENT     Add custom metadata comment to all songs
+      --comment COMMENT     Add custom metadata comment to all songs. Can include {create_time} or {creator} if the URI is a playlist.
       --cover-file COVER_FILE
                             Save album cover image to file name (e.g "cover.jpg") [Default=embed]
       -d DIRECTORY, --directory DIRECTORY
@@ -128,6 +136,8 @@ Command Line
       --pcm                 Saves a .pcm file with the raw PCM data instead of MP3
       --mp4                 Rip songs to MP4/M4A format with Fraunhofer FDK AAC codec instead of MP3
       --normalize           Normalize volume levels of tracks
+      -na, --normalized-ascii
+                            Convert the file name to normalized ASCII with unicodedata.normalize (NFKD)
       -o, --overwrite       Overwrite existing MP3 files [Default=skip]
       --opus                Rip songs to Opus encoding instead of MP3
       --playlist-m3u        create a m3u file when ripping a playlist
@@ -136,9 +146,17 @@ Command Line
       -q VBR, --vbr VBR     VBR quality setting or target bitrate for Opus [Default=0]
       -Q {160,320,96}, --quality {160,320,96}
                             Spotify stream bitrate preference [Default=320]
+      --resume-after RESUME_AFTER
+                            Resumes script after a certain amount of time has passed after stopping (e.g. 1h30m). Alternatively, accepts a specific time in 24hr format to start after (e.g 03:30, 16:15). Requires --stop-after option to be set
+      -R REPLACE [REPLACE ...], --replace REPLACE [REPLACE ...]
+                            pattern to replace the output filename separated by "/".
+                            The following example replaces all spaces with "_" and all "-" with ".":
+                                spotify-ripper --replace " /_" "\-/." uri
       -s, --strip-colors    Strip coloring from output[Default=colors]
       --stereo-mode {j,s,f,d,m,l,r}
                             Advanced stereo settings for Lame MP3 encoder only
+      --stop-after STOP_AFTER
+                            Stops script after a certain amount of time has passed (e.g. 1h30m). Alternatively, accepts a specific time in 24hr format to stop after (e.g 03:30, 16:15)
       -V, --version         show program's version number and exit
       --wav                 Rip songs to uncompressed WAV file instead of MP3
       --vorbis              Rip songs to Ogg Vorbis encoding instead of MP3
@@ -148,9 +166,10 @@ Command Line
                             Exclude albums that an artist 'appears on' when passing a Spotify artist URI
 
     Example usage:
-        rip a single file: spotify-ripper -u user -p password spotify:track:52xaypL0Kjzk0ngwv3oBPR
-        rip entire playlist: spotify-ripper -u user -p password spotify:user:username:playlist:4vkGNcsS8lRXj4q945NIA4
-        rip a list of URIs: spotify-ripper -u user -p password list_of_uris.txt
+        rip a single file: spotify-ripper -u user spotify:track:52xaypL0Kjzk0ngwv3oBPR
+        rip entire playlist: spotify-ripper -u user spotify:user:username:playlist:4vkGNcsS8lRXj4q945NIA4
+        rip a list of URIs: spotify-ripper -u user list_of_uris.txt
+        rip tracks from Spotify's charts: spotify-ripper -l spotify:charts:regional:global:weekly:latest
         search for tracks to rip: spotify-ripper -l -Q 160 -o "album:Rumours track:'the chain'"
 
 Facebook Login
@@ -241,12 +260,12 @@ Any substring in the format string that does not match a variable above will be 
 Zero-Filled Padding
 ~~~~~~~~~~~~~~~~~~~
 
-Format variables that represent an index can be padded with zeros to a user-specified length.  For example, ``{idx:3}`` will produce the following output: 001, 002, 003, etc.  If no number is provided, no zero-filled padding will occur (e.g. 8, 9, 10, 11, ...). The variables that accept this option include ``{idx}``, ``{track_num}``, and ``{disc_num}`` and thier aliases.
+Format variables that represent an index can be padded with zeros to a user-specified length.  For example, ``{idx:3}`` will produce the following output: 001, 002, 003, etc.  If no number is provided, no zero-filled padding will occur (e.g. 8, 9, 10, 11, ...). The variables that accept this option include ``{idx}``, ``{track_num}``, and ``{disc_num}`` and their aliases.
 
 Prefix String
 ~~~~~~~~~~~~~
 
-Format variable ``feat_artists`` takes a prefix string to be prepended before the output.  For example, ``{feat_artists:featuring} will produce the follow ouputing ``featuing Bruno Mars``.  If there are no featuring artists, the prefix string (and any preceeding spaces) will not be included.
+Format variable ``feat_artists`` takes a prefix string to be prepended before the output.  For example, ``{feat_artists:featuring} will produce the follow output ``featuing Bruno Mars``.  If there are no featuring artists, the prefix string (and any preceding spaces) will not be included.
 
 Playlist Sync Option
 ~~~~~~~~~~~~~~~~~~~~
@@ -316,6 +335,8 @@ To install spotify-ripper once pyenv is setup:
     $ pip install spotify-ripper
     $ pyenv rehash
 
+**Note that Spotify may no longer be issuing developer keys.** See `Libspotify’s Deprecation`_
+
 Download an application key file ``spotify_appkey.key`` from
 ``https://devaccount.spotify.com/my-account/keys/`` (requires a Spotify
 Premium Account) and move the file to the ``~/.spotify-ripper`` directory (or use
@@ -352,6 +373,8 @@ To install spotify-ripper once pyenv is setup:
     $ sudo make install prefix=/usr/local
     $ pip install spotify-ripper
     $ pyenv rehash
+
+**Note that Spotify may no longer be issuing developer keys.** See `Libspotify’s Deprecation`_
 
 Download an application key file ``spotify_appkey.key`` from
 ``https://devaccount.spotify.com/my-account/keys/`` (requires a Spotify

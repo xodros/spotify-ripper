@@ -32,8 +32,8 @@ def load_config(defaults):
             config_items = dict(config.items("main"))
 
             to_array_options = [
-                "directory", "key", "user", "password", "log",
-                "genres", "format"]
+                "comment", "cover_file", "directory", "fail_log", "format",
+                "genres", "key", "user", "password", "log", "replace"]
 
             # coerce boolean and none types
             for _key in config_items:
@@ -120,9 +120,10 @@ def main(prog_args=sys.argv[1:]):
         parents=[settings_parser],
         formatter_class=argparse.RawTextHelpFormatter,
         epilog='''Example usage:
-    rip a single file: spotify-ripper -u user -p password spotify:track:52xaypL0Kjzk0ngwv3oBPR
-    rip entire playlist: spotify-ripper -u user -p password spotify:user:username:playlist:4vkGNcsS8lRXj4q945NIA4
-    rip a list of URIs: spotify-ripper -u user -p password list_of_uris.txt
+    rip a single file: spotify-ripper -u user spotify:track:52xaypL0Kjzk0ngwv3oBPR
+    rip entire playlist: spotify-ripper -u user spotify:user:username:playlist:4vkGNcsS8lRXj4q945NIA4
+    rip a list of URIs: spotify-ripper -u user list_of_uris.txt
+    rip tracks from Spotify's charts: spotify-ripper -l spotify:charts:regional:global:weekly:latest
     search for tracks to rip: spotify-ripper -l -Q 160 -o "album:Rumours track:'the chain'"
     ''')
 
@@ -168,7 +169,8 @@ def main(prog_args=sys.argv[1:]):
         help='compression complexity for FLAC and Opus [Default=Max]')
     parser.add_argument(
         '--comment', nargs=1,
-        help='Add custom metadata comment to all songs')
+        help='Add custom metadata comment to all songs. Can include '
+             '{create_time} or {creator} if the URI is a playlist.')
     parser.add_argument(
         '--cover-file', nargs=1,
         help='Save album cover image to file name (e.g "cover.jpg") '
@@ -178,8 +180,7 @@ def main(prog_args=sys.argv[1:]):
         help='Base directory where ripped MP3s are saved [Default=cwd]')
     parser.add_argument(
         '--fail-log', nargs=1,
-        help="Logs the list of track URIs that failed to rip"
-    )
+        help="Logs the list of track URIs that failed to rip")
     encoding_group.add_argument(
         '--flac', action='store_true',
         help='Rip songs to lossless FLAC encoding instead of MP3')
@@ -229,6 +230,10 @@ def main(prog_args=sys.argv[1:]):
         '--normalize', action='store_true',
         help='Normalize volume levels of tracks')
     parser.add_argument(
+        '-na', '--normalized-ascii', action='store_true',
+        help='Convert the file name to normalized ASCII with '
+             'unicodedata.normalize (NFKD)')
+    parser.add_argument(
         '-o', '--overwrite', action='store_true',
         help='Overwrite existing MP3 files [Default=skip]')
     encoding_group.add_argument(
@@ -250,11 +255,28 @@ def main(prog_args=sys.argv[1:]):
         '-Q', '--quality', choices=['160', '320', '96'],
         help='Spotify stream bitrate preference [Default=320]')
     parser.add_argument(
+        '--resume-after',
+        help='Resumes script after a certain amount of time has passed '
+             'after stopping (e.g. 1h30m). Alternatively, accepts a specific '
+             'time in 24hr format to start after (e.g 03:30, 16:15). '
+             'Requires --stop-after option to be set')
+    parser.add_argument(
+        '-R', '--replace', nargs="+", required=False,
+        help='pattern to replace the output filename separated by "/". '
+             'The following example replaces all spaces with "_" and all "-" '
+             'with ".":'
+             '    spotify-ripper --replace " /_" "\-/." uri')
+    parser.add_argument(
         '-s', '--strip-colors', action='store_true',
         help='Strip coloring from output [Default=colors]')
     parser.add_argument(
         '--stereo-mode', choices=['j', 's', 'f', 'd', 'm', 'l', 'r'],
         help='Advanced stereo settings for Lame MP3 encoder only')
+    parser.add_argument(
+        '--stop-after',
+        help='Stops script after a certain amount of time has passed '
+             '(e.g. 1h30m). Alternatively, accepts a specific time in 24hr '
+             'format to stop after (e.g 03:30, 16:15)')
     parser.add_argument(
         '-V', '--version', action='version', version=prog_version)
     encoding_group.add_argument(
@@ -305,6 +327,13 @@ def main(prog_args=sys.argv[1:]):
     # for utf-8 by default
     if not args.ascii and sys.version_info < (3, 0):
         sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
+
+    # small sanity check on user option
+    if args.user is not None and args.user[0] == "USER":
+        print(Fore.RED + "Please pass your username as --user " +
+              "<YOUR_USER_NAME> instead of --user USER " +
+              "<YOUR_USER_NAME>..." + Fore.RESET)
+        sys.exit(1)
 
     if args.wav:
         args.output_type = "wav"
@@ -409,6 +438,16 @@ def main(prog_args=sys.argv[1:]):
         else:
             return "Yes"
 
+    # check that --stop-after and --resume-after options are valid
+    if args.stop_after is not None and \
+            parse_time_str(args.stop_after) is None:
+        print(Fore.RED + "--stop-after option is not valid" + Fore.RESET)
+        sys.exit(1)
+    if args.resume_after is not None and \
+            parse_time_str(args.resume_after) is None:
+        print(Fore.RED + "--resume-after option is not valid" + Fore.RESET)
+        sys.exit(1)
+
     print(Fore.YELLOW + "  Unicode support:\t" +
           Fore.RESET + unicode_support_str())
     print(Fore.YELLOW + "  Output directory:\t" + Fore.RESET +
@@ -436,7 +475,7 @@ def main(prog_args=sys.argv[1:]):
     def abort(set_logged_in=False):
         ripper.abort_rip()
         if set_logged_in:
-            ripper.logged_in.set()
+            ripper.ripper_continue.set()
         ripper.join()
         sys.exit(1)
 
@@ -447,6 +486,8 @@ def main(prog_args=sys.argv[1:]):
                 Fore.RED + "Encountered issue while logging into "
                            "Spotify, aborting..." + Fore.RESET)
             abort(set_logged_in=True)
+        else:
+            ripper.ripper_continue.set()
 
     except (KeyboardInterrupt, Exception) as e:
         if not isinstance(e, KeyboardInterrupt):

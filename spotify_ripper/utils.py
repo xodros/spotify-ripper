@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 
-from __future__ import unicode_literals
+from __future__ import unicode_literals, print_function
 
 from colorama import Fore, Style
+from datetime import datetime, timedelta
 import os
 import sys
 import errno
 import re
 import math
+import unicodedata
 
 
 #  since there is no class, use global var
@@ -34,8 +36,11 @@ def path_exists(path):
 def print_str(_str):
     """print without newline"""
     if not get_args().has_log:
-        sys.stdout.write(_str)
-        sys.stdout.flush()
+        if sys.version_info >= (3, 0):
+            print(_str, end = '', flush = True)
+        else:
+            sys.stdout.write(_str)
+            sys.stdout.flush()
 
 
 def norm_path(path):
@@ -73,6 +78,13 @@ def to_ascii(_str, on_error='ignore'):
             return _str
 
 
+def to_normalized_ascii(_str):
+    if sys.version_info < (3, 0):
+        if not isinstance(_str, unicode):
+            _str = unicode(_str, "utf-8")
+    return unicodedata.normalize('NFKD', _str).encode('ASCII', 'ignore')
+
+
 def rm_file(file_name):
     try:
         os.remove(file_name)
@@ -103,6 +115,44 @@ def base_dir():
 
 def calc_file_size(track):
     return (int(get_args().quality) / 8) * track.duration
+
+
+def parse_time_str(time_str):
+    # if we are passed a time (e.g. 14:20)
+    if re.match(r"^\d{2}:\d{2}$", time_str):
+        t = datetime.strptime(time_str, "%H:%M")
+        calc_time = datetime.now().replace(hour=t.hour, minute=t.minute)
+        if datetime.now() > calc_time:
+            calc_time += timedelta(days=1)
+
+        return calc_time
+
+    # if we are passed hour/minute offset (e.g. 1h20m)
+    match = re.match(r"^((\d+h)?(\d+m))|(\d+h)$", time_str)
+    if match is not None:
+        calc_time = datetime.now()
+        groups = match.groups()
+
+        hours = groups[1] if groups[1] is not None else groups[3]
+        if hours is not None:
+            calc_time = calc_time + timedelta(hours=int(hours[:-1]))
+
+        minutes = groups[2]
+        if minutes is not None:
+            calc_time = calc_time + timedelta(minutes=int(minutes[:-1]))
+
+        return calc_time
+
+    return None
+
+
+def get_playlist_track(track, playlist):
+    if playlist is not None:
+        pl_tracks = playlist.tracks_with_metadata
+        for pl_track in pl_tracks:
+            if pl_track.track == track:
+                return pl_track
+    return None
 
 
 # returns path of executable
